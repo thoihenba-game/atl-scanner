@@ -1,41 +1,45 @@
-import requests, os
+import requests, os, time
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-THRESHOLD = 12
+THRESHOLD = 15  # increased to 15% for real bottoms
+
+STABLES = set(["tether","usd-coin","first-digital-usd","dai","true-usd","frax","usdd","paxos-standard","gemini-dollar","usdp","usde","ethena-usde","paypal-usd","binance-usd","liquity-usd","magic-internet-money","alchemix-usd","fei-usd"])
 
 def send(msg):
-    try:
-        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-            json={"chat_id": CHAT_ID, "text": msg, "parse_mode":"Markdown"}, timeout=10)
-    except: pass
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
+        json={"chat_id": CHAT_ID, "text": msg, "parse_mode":"Markdown"}, timeout=10)
 
-# 1. Get Binance list - using data-api which works on GitHub
+print("Getting Binance list...")
+binance_ids = set()
 try:
-    url = "https://data-api.binance.vision/api/v3/exchangeInfo"
-    binance = requests.get(url, timeout=15).json()
-    binance_coins = set(s['baseAsset'].upper() for s in binance['symbols'] if s['status']=='TRADING')
-    print(f"Binance coins loaded: {len(binance_coins)}")
-except Exception as e:
-    print(f"Binance API fail {e}, using backup list")
-    # Backup - top Binance coins
-    binance_coins = set(["BTC","ETH","BNB","SOL","XRP","DOGE","ADA","AVAX","SHIB","DOT","TRX","LINK","MATIC","LTC","BCH","UNI","XLM","ETC","ATOM","HBAR","FIL","APT","ARB","OP","NEAR","SUI","PEPE","BONK","FLOKI","WIF","FET","RNDR","INJ","TIA","SEI","JUP","ENA","W","PYTH","STRK"])
+    data = requests.get("https://api.coingecko.com/api/v3/exchanges/binance/tickers", timeout=15).json()
+    for t in data.get('tickers', []):
+        if t.get('coin_id'):
+            binance_ids.add(t['coin_id'])
+    print(f"Binance IDs: {len(binance_ids)}")
+except: pass
 
-# 2. Scan
 for page in range(1, 6):
-    try:
-        coins = requests.get(
-            f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&per_page=250&page={page}&order=market_cap_desc",
-            timeout=15).json()
-    except: continue
-    
+    coins = requests.get(
+        f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&per_page=250&page={page}&order=market_cap_desc",
+        timeout=15).json()
     for c in coins:
-        sym = c['symbol'].upper()
-        if sym not in binance_coins: continue
+        # FILTER 1: Skip stablecoins
+        if c['id'] in STABLES: continue
+        if c['symbol'].lower() in ['usdt','usdc','fdusd','dai','busd']: continue
+        if c['current_price'] > 0.9 and c['atl'] > 0.5: continue  # stablecoin price logic
+
+        # FILTER 2: Binance only
+        if binance_ids and c['id'] not in binance_ids: continue
+        
+        # FILTER 3: Real bottom (ATL must be real crash, not 5% down)
         if not c.get('atl'): continue
         dist = (c['current_price'] - c['atl']) / c['atl'] * 100
         if dist <= THRESHOLD:
-            msg = f"🚨 *Binance* {c['name']} ({sym}) +{dist:.1f}% from ATL\nPrice ${c['current_price']} ATL ${c['atl']}"
+            # FILTER 4: Must be at least 50% down from ATH to be real bottom
+            ath_dist = (c['current_price'] - c['ath']) / c['ath'] * 100 if c.get('ath') else -99
+            if ath_dist > -50: continue  # skip if not 50% down from ATH
+            
+            msg = f"🚨 *{c['name']} ({c['symbol'].upper()})* is near ATL\n+{dist:.1f}% from ATL | {ath_dist:.0f}% from ATH\nPrice ${c['current_price']} | ATL ${c['atl']} | Rank #{c['market_cap_rank']}"
             send(msg)
             print(msg)
-
-print("Done")
